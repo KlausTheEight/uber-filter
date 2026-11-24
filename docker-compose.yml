@@ -1,0 +1,18 @@
+services:
+  dev:
+    build: .
+    container_name: uber_filter_dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - gradle_cache:/home/node/.gradle
+      - pnpm_store:/home/node/.local/share/pnpm
+    ports:
+      - "127.0.0.1:8082:8081"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    command: tail -f /dev/null
+
+volumes:
+  gradle_cache:
+  pnpm_store:
