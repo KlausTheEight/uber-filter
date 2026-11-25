@@ -1,5 +1,6 @@
-import React, {useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  AppState,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -12,7 +13,17 @@ import {InMemoryStorage, SettingsStore} from '../data/settingsStore';
 import {parseOfferFromTextNodes} from '../domain/parser/OfferParser';
 import {evaluateOffer} from '../domain/RulesEngine';
 import {AppSettings, TrafficLight} from '../domain/types';
+import {
+  getLastScreenSnapshot,
+  isAccessibilityServiceEnabled,
+  isNativeBridgeAvailable,
+  NativeScreenSnapshot,
+  openAccessibilitySettings,
+  subscribeToScreenSnapshots,
+} from '../native/AccessibilityBridge';
 import {SIMULATOR_PRESETS} from './OfferSimulatorPresets';
+
+type DashboardSource = 'LIVE' | 'SIMULATOR';
 
 const LIGHT_THEME: Record<
   TrafficLight,
@@ -24,8 +35,11 @@ const LIGHT_THEME: Record<
   UNKNOWN: {cardBg: '#334155', badgeBg: '#1E293B', label: 'REVISAR'},
 };
 
-function buildSimulatedDate(isNightMode: boolean): Date {
-  return new Date(2026, 10, 25, isNightMode ? 22 : 15, 0, 0);
+function buildEvaluationDate(forceNight: boolean): Date {
+  if (forceNight) {
+    return new Date(2026, 10, 25, 22, 0, 0);
+  }
+  return new Date(2026, 10, 25, 15, 0, 0);
 }
 
 export function DashboardScreen(): React.JSX.Element {
@@ -33,10 +47,53 @@ export function DashboardScreen(): React.JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(() =>
     storeRef.current.getAll(),
   );
+  const [source, setSource] = useState<DashboardSource>('LIVE');
+  const [serviceConnected, setServiceConnected] = useState<boolean>(false);
+  const [liveSnapshot, setLiveSnapshot] = useState<NativeScreenSnapshot | null>(
+    null,
+  );
   const [selectedPresetId, setSelectedPresetId] = useState<string>(
     SIMULATOR_PRESETS[0].id,
   );
   const [simulateNight, setSimulateNight] = useState<boolean>(false);
+
+  const syncNativeState = useCallback(async () => {
+    if (!isNativeBridgeAvailable()) {
+      return;
+    }
+    const [enabled, last] = await Promise.all([
+      isAccessibilityServiceEnabled(),
+      getLastScreenSnapshot(),
+    ]);
+    setServiceConnected(enabled);
+    if (last) {
+      setLiveSnapshot(last);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isNativeBridgeAvailable()) {
+      return;
+    }
+
+    syncNativeState();
+
+    const unsubscribe = subscribeToScreenSnapshots(snapshot => {
+      setLiveSnapshot(snapshot);
+      setServiceConnected(true);
+    });
+
+    const appStateSub = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        syncNativeState();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      appStateSub.remove();
+    };
+  }, [syncNativeState]);
 
   const updateSettings = (partial: Partial<AppSettings>): void => {
     const next = storeRef.current.update(partial);
@@ -47,18 +104,29 @@ export function DashboardScreen(): React.JSX.Element {
     SIMULATOR_PRESETS.find(item => item.id === selectedPresetId) ??
     SIMULATOR_PRESETS[0];
 
+  const activeTextNodes =
+    source === 'LIVE'
+      ? liveSnapshot?.textNodes ?? []
+      : selectedPreset.textNodes;
+
   const {offer, evaluation} = useMemo(() => {
-    const parsed = parseOfferFromTextNodes(selectedPreset.textNodes, {
+    const evalDate = buildEvaluationDate(simulateNight);
+    const parsed = parseOfferFromTextNodes(activeTextNodes, {
       includePickupDistance: settings.includePickupDistance,
-      detectedAtIso: buildSimulatedDate(simulateNight).toISOString(),
+      detectedAtIso: evalDate.toISOString(),
+      rejectButtonBounds:
+        source === 'LIVE'
+          ? liveSnapshot?.rejectButtonBounds ?? undefined
+          : undefined,
     });
-    const evaluated = evaluateOffer(parsed, settings, {
-      now: buildSimulatedDate(simulateNight),
-    });
+    const evaluated = evaluateOffer(parsed, settings, {now: evalDate});
     return {offer: parsed, evaluation: evaluated};
-  }, [selectedPreset, settings, simulateNight]);
+  }, [activeTextNodes, settings, simulateNight, source, liveSnapshot]);
 
   const theme = LIGHT_THEME[evaluation.light];
+  const liveCapturedAt = liveSnapshot
+    ? new Date(liveSnapshot.timestampMs).toLocaleTimeString()
+    : null;
 
   return (
     <View style={styles.root}>
@@ -66,26 +134,83 @@ export function DashboardScreen(): React.JSX.Element {
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
-          <Text style={styles.appTitle}>UberFilter · Quilicura</Text>
-          <Text style={styles.appSubtitle}>
-            Motor de reglas en vivo (Bloque 1A)
-          </Text>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.appTitle}>UberFilter · Quilicura</Text>
+            <Text style={styles.appSubtitle}>
+              {source === 'LIVE'
+                ? 'Modo lectura real (AccessibilityService)'
+                : 'Modo simulador local'}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.statusPill,
+              serviceConnected ? styles.statusOn : styles.statusOff,
+            ]}
+            onPress={openAccessibilitySettings}>
+            <Text style={styles.statusPillText}>
+              {serviceConnected ? 'ACTIVO' : 'ACTIVAR'}
+            </Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Tarjeta Semáforo (preview del futuro Overlay) */}
+        {/* Selector de fuente */}
+        <View style={styles.modeSwitchRow}>
+          <TouchableOpacity
+            style={[
+              styles.modeBtn,
+              source === 'LIVE' && styles.modeBtnActive,
+            ]}
+            onPress={() => {
+              setSource('LIVE');
+              syncNativeState();
+            }}>
+            <Text
+              style={[
+                styles.modeBtnText,
+                source === 'LIVE' && styles.modeBtnTextActive,
+              ]}>
+              En Vivo (Android)
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.modeBtn,
+              source === 'SIMULATOR' && styles.modeBtnActive,
+            ]}
+            onPress={() => setSource('SIMULATOR')}>
+            <Text
+              style={[
+                styles.modeBtnText,
+                source === 'SIMULATOR' && styles.modeBtnTextActive,
+              ]}>
+              Simulador
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Tarjeta Semáforo */}
         <View style={[styles.lightCard, {backgroundColor: theme.cardBg}]}>
           <View style={styles.lightCardHeader}>
             <View style={[styles.badge, {backgroundColor: theme.badgeBg}]}>
               <Text style={styles.badgeText}>{theme.label}</Text>
             </View>
             <Text style={styles.clockBadge}>
-              Hora sim: {simulateNight ? '22:00 (Noche)' : '15:00 (Día)'}
+              {simulateNight ? 'Hora: 22:00 (Noche)' : 'Hora: 15:00 (Día)'}
             </Text>
           </View>
 
-          <Text style={styles.headline}>{evaluation.displayHeadline}</Text>
-          <Text style={styles.subline}>{evaluation.displaySubline}</Text>
+          <Text style={styles.headline}>
+            {source === 'LIVE' && !liveSnapshot
+              ? 'ESPERANDO CAPTURA'
+              : evaluation.displayHeadline}
+          </Text>
+          <Text style={styles.subline}>
+            {source === 'LIVE' && !liveSnapshot
+              ? 'Abre Google Keep con una oferta o Uber Driver y vuelve aquí'
+              : evaluation.displaySubline}
+          </Text>
 
           <View style={styles.metricsRow}>
             <Text style={styles.metricText}>
@@ -102,6 +227,12 @@ export function DashboardScreen(): React.JSX.Element {
           <Text style={styles.reasonsText}>
             Motivos: {evaluation.allReasons.join(' · ')}
           </Text>
+          {source === 'LIVE' && liveSnapshot && (
+            <Text style={styles.sourceMeta}>
+              Fuente: {liveSnapshot.packageName} · {liveCapturedAt} (
+              {liveSnapshot.textNodes.length} nodos)
+            </Text>
+          )}
           {evaluation.autoRejectDelaySec !== null && (
             <Text style={styles.timerText}>
               Auto-rechazo en {evaluation.autoRejectDelaySec}s (
@@ -110,28 +241,35 @@ export function DashboardScreen(): React.JSX.Element {
           )}
         </View>
 
-        {/* Selector de Tarjetas Simuladas */}
-        <Text style={styles.sectionTitle}>Simular tarjeta Uber</Text>
-        <View style={styles.presetsGrid}>
-          {SIMULATOR_PRESETS.map(preset => {
-            const active = preset.id === selectedPreset.id;
-            return (
-              <TouchableOpacity
-                key={preset.id}
-                style={[styles.presetBtn, active && styles.presetBtnActive]}
-                onPress={() => setSelectedPresetId(preset.id)}>
-                <Text
-                  style={[
-                    styles.presetLabel,
-                    active && styles.presetLabelActive,
-                  ]}>
-                  {preset.label}
-                </Text>
-                <Text style={styles.presetDesc}>{preset.description}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {/* Selector de Tarjetas Simuladas (solo visible en modo Simulador) */}
+        {source === 'SIMULATOR' && (
+          <>
+            <Text style={styles.sectionTitle}>Simular tarjeta Uber</Text>
+            <View style={styles.presetsGrid}>
+              {SIMULATOR_PRESETS.map(preset => {
+                const active = preset.id === selectedPreset.id;
+                return (
+                  <TouchableOpacity
+                    key={preset.id}
+                    style={[
+                      styles.presetBtn,
+                      active && styles.presetBtnActive,
+                    ]}
+                    onPress={() => setSelectedPresetId(preset.id)}>
+                    <Text
+                      style={[
+                        styles.presetLabel,
+                        active && styles.presetLabelActive,
+                      ]}>
+                      {preset.label}
+                    </Text>
+                    <Text style={styles.presetDesc}>{preset.description}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </>
+        )}
 
         {/* Controles rápidos de reglas */}
         <Text style={styles.sectionTitle}>Ajustes rápidos en vivo</Text>
@@ -154,7 +292,10 @@ export function DashboardScreen(): React.JSX.Element {
                 style={styles.stepBtn}
                 onPress={() =>
                   updateSettings({
-                    minRateClpPerKm: Math.max(200, settings.minRateClpPerKm - 50),
+                    minRateClpPerKm: Math.max(
+                      200,
+                      settings.minRateClpPerKm - 50,
+                    ),
                   })
                 }>
                 <Text style={styles.stepBtnText}>-50</Text>
@@ -176,7 +317,9 @@ export function DashboardScreen(): React.JSX.Element {
 
           <View style={styles.row}>
             <View style={styles.rowTextWrap}>
-              <Text style={styles.rowLabel}>Simular horario nocturno (22:00)</Text>
+              <Text style={styles.rowLabel}>
+                Forzar horario nocturno (22:00)
+              </Text>
               <Text style={styles.rowHint}>
                 Bloquea efectivo de {settings.cashRejectStartTime} a{' '}
                 {settings.cashRejectEndTime}
@@ -189,7 +332,9 @@ export function DashboardScreen(): React.JSX.Element {
 
           <View style={styles.row}>
             <View style={styles.rowTextWrap}>
-              <Text style={styles.rowLabel}>Solo exigir destino en Quilicura</Text>
+              <Text style={styles.rowLabel}>
+                Solo exigir destino en Quilicura
+              </Text>
               <Text style={styles.rowHint}>
                 Modo actual: {settings.workZoneMode}
               </Text>
@@ -210,12 +355,15 @@ export function DashboardScreen(): React.JSX.Element {
             <View style={styles.rowTextWrap}>
               <Text style={styles.rowLabel}>Incluir distancia de recogida</Text>
               <Text style={styles.rowHint}>
-                Recogida: {offer.pickupKm ?? 0} km · Viaje: {offer.tripKm ?? 0} km
+                Recogida: {offer.pickupKm ?? 0} km · Viaje:{' '}
+                {offer.tripKm ?? 0} km
               </Text>
             </View>
             <Switch
               value={settings.includePickupDistance}
-              onValueChange={val => updateSettings({includePickupDistance: val})}
+              onValueChange={val =>
+                updateSettings({includePickupDistance: val})
+              }
             />
           </View>
 
@@ -223,10 +371,13 @@ export function DashboardScreen(): React.JSX.Element {
 
           <View style={styles.row}>
             <View style={styles.rowTextWrap}>
-              <Text style={styles.rowLabel}>Simular timer de auto-rechazo</Text>
+              <Text style={styles.rowLabel}>
+                Simular timer de auto-rechazo
+              </Text>
               <Text style={styles.rowHint}>
                 Rojo {settings.redAutoRejectSeconds}s · Amarillo{' '}
-                {settings.redAutoRejectSeconds * settings.yellowTimerMultiplier}s
+                {settings.redAutoRejectSeconds * settings.yellowTimerMultiplier}
+                s
               </Text>
             </View>
             <Switch
@@ -236,7 +387,7 @@ export function DashboardScreen(): React.JSX.Element {
           </View>
         </View>
 
-        {/* Direcciones extraídas */}
+        {/* Inspector de lectura */}
         <View style={styles.debugBox}>
           <Text style={styles.debugTitle}>Lectura del OfferParser</Text>
           <Text style={styles.debugLine}>
@@ -262,18 +413,62 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 32,
   },
-  header: {
-    marginBottom: 14,
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
   },
   appTitle: {
-    fontSize: 22,
+    fontSize: 21,
     fontWeight: '700',
     color: '#F8FAFC',
   },
   appSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#94A3B8',
     marginTop: 2,
+  },
+  statusPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  statusOn: {
+    backgroundColor: '#15803D',
+  },
+  statusOff: {
+    backgroundColor: '#B91C1C',
+  },
+  statusPillText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 11,
+    letterSpacing: 0.5,
+  },
+  modeSwitchRow: {
+    flexDirection: 'row',
+    backgroundColor: '#1E293B',
+    borderRadius: 12,
+    padding: 4,
+    marginBottom: 14,
+  },
+  modeBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 9,
+    alignItems: 'center',
+  },
+  modeBtnActive: {
+    backgroundColor: '#2563EB',
+  },
+  modeBtnText: {
+    color: '#94A3B8',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  modeBtnTextActive: {
+    color: '#FFFFFF',
   },
   lightCard: {
     borderRadius: 16,
@@ -329,6 +524,11 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 12,
     marginTop: 8,
+  },
+  sourceMeta: {
+    color: '#CBD5E1',
+    fontSize: 11,
+    marginTop: 6,
   },
   timerText: {
     color: '#FEF08A',

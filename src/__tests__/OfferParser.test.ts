@@ -145,4 +145,31 @@ describe('OfferParser', () => {
     expect(first.offerHash).toBe(second.offerHash);
     expect(first.offerHash).not.toBe(different.offerHash);
   });
+
+  it('ignora ruido de UI de Android/Keep antes de las direcciones reales', () => {
+    const offer = parseOfferFromTextNodes(
+      [
+        'Buscar en Keep',
+        'Buscar en Keep',
+        'Título de la nota',
+        'Título',
+        'UberX',
+        '$2.450',
+        'Efectivo',
+        '600 m de distancia',
+        'Av. Lo Cruzat 0350, Quilicura',
+        '4,1 km de viaje',
+        'Av. Manuel Antonio Matta 540, Quilicura',
+      ],
+      {includePickupDistance: true},
+    );
+
+    expect(offer.priceClp).toBe(2450);
+    expect(offer.totalKm).toBe(4.7);
+    expect(offer.isCash).toBe(true);
+    expect(offer.originText).toBe('Av. Lo Cruzat 0350, Quilicura');
+    expect(offer.destinationText).toBe(
+      'Av. Manuel Antonio Matta 540, Quilicura',
+    );
+  });
 });

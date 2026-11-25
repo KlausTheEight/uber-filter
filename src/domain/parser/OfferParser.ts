@@ -14,6 +14,8 @@ const CASH_REGEX = /\b(efectivo|cash)\b/i;
 
 const PICKUP_HINTS = /(distancia|recogida|recoger|pickup|away)/i;
 const TRIP_HINTS = /(de viaje|viaje|trip|recorrido)/i;
+const ADDRESS_SIGNAL_REGEX =
+  /,|\b\d{1,5}\b|\b(av|avda|avenida|calle|pasaje|pje|camino|ruta|autopista|mall|metro|plaza|parque|sta|santa|santo|gral|general|pdte|presidente)\b/i;
 
 const UI_NOISE_EXACT = new Set([
   'uberx',
@@ -93,7 +95,6 @@ function parseDistances(textNodes: string[]): {
     }
   }
 
-  // Si no venían etiquetas explícitas, asigna por orden de aparición
   if (pickupKm === null && tripKm === null) {
     if (untagged.length >= 2) {
       pickupKm = untagged[0];
@@ -115,7 +116,6 @@ function isAddressCandidate(node: string): boolean {
   if (trimmed.length < 5) {
     return false;
   }
-  // Debe contener al menos 3 letras seguidas (descarta ratings "4,92 ★", números sueltos, etc.)
   if (!/[a-zA-ZáéíóúñÁÉÍÓÚÑ]{3,}/.test(trimmed)) {
     return false;
   }
@@ -136,10 +136,35 @@ function isAddressCandidate(node: string): boolean {
   return true;
 }
 
+function extractAddresses(textNodes: string[]): string[] {
+  const seen = new Set<string>();
+  const uniqueCandidates: string[] = [];
+
+  for (const raw of textNodes) {
+    if (!isAddressCandidate(raw)) {
+      continue;
+    }
+    const trimmed = raw.trim();
+    const key = normalizeText(trimmed);
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueCandidates.push(trimmed);
+    }
+  }
+
+  const strongMatches = uniqueCandidates.filter(item =>
+    ADDRESS_SIGNAL_REGEX.test(item),
+  );
+
+  return strongMatches.length > 0 ? strongMatches : uniqueCandidates;
+}
+
 /**
  * Hash FNV-1a 32-bit en JS puro (compatible con Hermes/React Native sin node:crypto).
  */
-function computeOfferHash(parts: Array<string | number | boolean | null>): string {
+function computeOfferHash(
+  parts: Array<string | number | boolean | null>,
+): string {
   const payload = parts.map(p => String(p ?? '')).join('|');
   let hash = 0x811c9dc5;
   for (let i = 0; i < payload.length; i += 1) {
@@ -168,7 +193,7 @@ export function parseOfferFromTextNodes(
 
   const isCash = textNodes.some(node => CASH_REGEX.test(node));
 
-  const addresses = textNodes.filter(isAddressCandidate).map(s => s.trim());
+  const addresses = extractAddresses(textNodes);
   let originText: string | null = null;
   let destinationText: string | null = null;
 
