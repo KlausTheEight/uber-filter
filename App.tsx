@@ -4,7 +4,7 @@ import {View, Text, StyleSheet, StatusBar} from 'react-native';
 export default function App(): React.JSX.Element {
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#16A34A" />
+      <StatusBar barStyle="light-content" />
       <Text style={styles.title}>UberFilter OK</Text>
       <Text style={styles.subtitle}>Metro + WSL2 + Android 16 conectados</Text>
     </View>
