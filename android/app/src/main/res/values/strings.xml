@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">UberFilter</string>
+    <string name="accessibility_service_label">UberFilter · Lector de Ofertas</string>
+    <string name="accessibility_service_description">Lee tarjetas de viaje en pantalla para calcular tarifa por km, validar zona de trabajo y horario de efectivo.</string>
 </resources>
